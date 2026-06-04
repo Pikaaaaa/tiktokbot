@@ -12,6 +12,12 @@ from aiogram.filters import Command
 from aiogram.types import Message, FSInputFile
 from dotenv import load_dotenv
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -37,14 +43,8 @@ SUCCESS_STICKERS = [
 
 if not BOT_TOKEN:
     available = [k for k in os.environ if not k.startswith("_")]
-    log.error("BOT_TOKEN не найден. Доступные переменные: %s", available)
+    log.error("BOT_TOKEN не найден. Доступные переменные окружения: %s", available)
     raise RuntimeError("Не найден BOT_TOKEN в переменных окружения.")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger(__name__)
 
 router = Router()
 
@@ -55,6 +55,29 @@ TIKTOK_HOSTS = {
     "vt.tiktok.com",
     "m.tiktok.com",
 }
+
+
+LOADING_FRAMES = [
+    "🎵 Connecting to TikTok···",
+    "📡 Looking for your video·· ·",
+    "🎬 Capturing frames· · ·",
+    "⬇️ Downloading··· ",
+    "🎞 Processing video·· ·",
+    "✨ Almost there··· ",
+    "📦 Packing the file· · ·",
+    "🚀 Sending it over··· ",
+]
+
+
+async def animate_loading(status_msg: Message, stop_event: asyncio.Event) -> None:
+    i = 0
+    while not stop_event.is_set():
+        try:
+            await status_msg.edit_text(LOADING_FRAMES[i % len(LOADING_FRAMES)])
+        except Exception:
+            pass
+        i += 1
+        await asyncio.sleep(1.2)
 
 
 async def send_sticker_if_set(message: Message, file_id: str) -> None:
@@ -119,25 +142,25 @@ async def download_video(url: str, output_dir: Path) -> Path:
 async def cmd_start(message: Message) -> None:
     await send_sticker_if_set(message, STICKER_START)
     await message.answer(
-        "👋 Привет! Я помогу скачать видео из TikTok без водяных знаков.\n\n"
-        "Просто отправьте ссылку на видео — и я пришлю файл.\n\n"
-        "📌 /help — как пользоваться\n"
-        "🆘 /support — написать администратору"
+        "👋 Hey! I can download TikTok videos without watermarks.\n\n"
+        "Just send me a video link and I'll send it right back.\n\n"
+        "📌 /help — how to use\n"
+        "🆘 /support — contact admin"
     )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "Как пользоваться: просто пришлите ссылку на видео из TikTok в этот чат, "
-        "и бот отправит вам видео без водяных знаков."
+        "How to use: just send a TikTok video link in this chat "
+        "and the bot will send you the video without watermarks."
     )
 
 
 @router.message(Command("support"))
 async def cmd_support(message: Message) -> None:
     await message.answer(
-        f"Если у вас возникли проблемы, напишите администратору: @{ADMIN_USERNAME}"
+        f"If you have any issues, contact the admin: @{ADMIN_USERNAME}"
     )
 
 
@@ -149,33 +172,41 @@ async def handle_text(message: Message) -> None:
 
     if not url:
         await message.answer(
-            "❌ Это не похоже на ссылку TikTok.\n"
-            "Пожалуйста, отправьте корректную ссылку.\n"
-            "Если нужна помощь — /support"
+            "❌ That doesn't look like a TikTok link.\n"
+            "Please send a valid TikTok URL.\n"
+            "Need help? — /support"
         )
         return
 
-    status_msg = await message.answer("⏳ Видео скачивается...")
+    status_msg = await message.answer(LOADING_FRAMES[0])
+    stop_event = asyncio.Event()
+    anim_task = asyncio.create_task(animate_loading(status_msg, stop_event))
 
     with tempfile.TemporaryDirectory(prefix="tiktok_bot_") as tmp:
         try:
             video_path = await download_video(url, Path(tmp))
+            stop_event.set()
+            await anim_task
+            await status_msg.edit_text("✅ Done! Video has been sent.")
             await message.answer_video(FSInputFile(video_path))
-            await status_msg.edit_text("✅ Готово! Видео отправлено.")
             await send_sticker_if_set(message, random.choice(SUCCESS_STICKERS))
         except RuntimeError as e:
-            log.warning("Ошибка скачивания user=%s err=%s", message.from_user and message.from_user.id, e)
+            stop_event.set()
+            await anim_task
+            log.warning("Download error user=%s err=%s", message.from_user and message.from_user.id, e)
             await status_msg.edit_text(
-                "⚠️ Не удалось скачать видео.\n"
-                "Проверьте ссылку или попробуйте позже.\n"
-                "Если ошибка повторяется — /support"
+                "⚠️ Failed to download the video.\n"
+                "Please check the link and try again.\n"
+                "If the issue persists — /support"
             )
             await send_sticker_if_set(message, STICKER_ERROR)
         except Exception as e:
-            log.exception("Непредвиденная ошибка: %s", e)
+            stop_event.set()
+            await anim_task
+            log.exception("Unexpected error: %s", e)
             await status_msg.edit_text(
-                "⚠️ Произошла непредвиденная ошибка.\n"
-                "Попробуйте позже или обратитесь в /support."
+                "⚠️ An unexpected error occurred.\n"
+                "Please try again later or contact /support."
             )
             await send_sticker_if_set(message, STICKER_ERROR)
 
